@@ -1,0 +1,10 @@
+[Unit]
+Description=Run PocketLog uploader every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=pocketlog-upload.service
+
+[Install]
+WantedBy=timers.target

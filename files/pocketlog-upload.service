@@ -1,0 +1,10 @@
+[Unit]
+Description=PocketLog S3 uploader
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/pocketlog/.venv/bin/python /opt/pocketlog/pocketlog.py
+Nice=10
+IOSchedulingClass=best-effort

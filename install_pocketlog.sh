@@ -23,11 +23,16 @@ apt-get update -y
 APT_FILE="./apt-manual.txt"
 if [[ -f "$APT_FILE" ]]; then
   say "Installing packages from ${APT_FILE} ..."
-  # Filter out comments/blank lines before passing to apt-get
-  xargs -a <(grep -Ev '^\s*#|^\s*$' "$APT_FILE") -r apt-get install -y
+  # Install one-by-one; skip blanks/comments; warn and continue on failures
+  while IFS= read -r pkg; do
+    [[ -z "$pkg" || "$pkg" =~ ^[[:space:]]*# ]] && continue
+    if ! apt-get install -y --no-install-recommends "$pkg"; then
+      warn "Skipping unavailable package: $pkg"
+    fi
+  done < "$APT_FILE"
 else
   warn "apt-manual.txt not found next to this script. Installing a minimal set of packages needed for PocketLog."
-  apt-get install -y rsyslog python3-venv python3-pip awscli logrotate gzip jq gcc make
+  apt-get install -y --no-install-recommends rsyslog python3-venv python3-pip awscli logrotate gzip jq gcc make tcpdump
 fi
 
 # 2) Create app directory and venv

@@ -16,10 +16,8 @@ rotates logs hourly and uploads compressed logs to Amazon S3.
 sudo apt-get update -y
 sudo apt-get install -y git
 
-git clone https://github.com/<your-username>/pocketlog-bootstrap.git
-cd pocketlog-bootstrap
-
-# (Optional) edit apt-manual.txt and requirements.txt to your taste
+git clone https://github.com/dbsheajr/pocketlog.git
+cd pocketlog
 
 # Install
 sudo ./install_pocketlog.sh

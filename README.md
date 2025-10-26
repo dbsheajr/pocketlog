@@ -32,7 +32,7 @@ sudo ./install_pocketlog.sh
 # chmod +x install_pocketlog.sh && sudo ./install_pocketlog.sh
 
 # Provide AWS credentials (or set env vars instead)
-aws configure
+sudo -H aws configure
 
 # Optional: set bucket/prefix/log root
 sudo nano /etc/pocketlog/pocketlog.conf

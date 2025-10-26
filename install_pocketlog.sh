@@ -149,7 +149,7 @@ systemctl enable pocketlog-upload.timer
 systemctl start pocketlog-upload.timer
 
 say "Done. Next steps:"
-echo "  1) Run: ${BOLD}aws configure${NC} (or set env vars AWS_ACCESS_KEY_ID/SECRET/REGION)"
+echo "  1) Run: ${BOLD}sudo -H aws configure${NC} (or set env vars AWS_ACCESS_KEY_ID/SECRET/REGION)"
 echo "  2) Edit /etc/pocketlog/pocketlog.conf with your bucket/prefix and log root (if needed)."
 echo "  3) Check uploader logs: journalctl -u pocketlog-upload -n 100 --no-pager"
 echo "  4) Send some test syslog to this host (UDP/TCP 514) and verify files land in ${LOG_ROOT} and then S3."

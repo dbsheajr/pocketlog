@@ -35,67 +35,87 @@ install -d -m 0755 "${CONF_DIR}"
 # -----------------------------
 # R S Y S L O G   C O N F I G
 # -----------------------------
+say "Installing rsyslog configuration from repository (with sane fallbacks)..."
 
-# Increase parser limit for big JSON (TCP recommended for large messages)
-say "Writing rsyslog global max message size..."
-tee /etc/rsyslog.d/02-maxmsgsize.conf >/dev/null <<'RSY'
-# Allow larger messages (adjust as needed). Use TCP on senders for big JSON.
-global(processInternalMessages="on" maxMessageSize="256k")
-RSY
+install -d -m 0755 /var/log/pocketlog
+install -d -m 0755 /etc/rsyslog.d
 
-# One combined file per hour; no external parsing modules required.
-say "Writing rsyslog ruleset for hourly combined file..."
-tee /etc/rsyslog.d/01-remote-hourly.conf >/dev/null <<'RSY'
-# /etc/rsyslog.d/01-remote-hourly.conf
-# One combined file per hour in /var/log/pocketlog/YYYY-MM-DD-HH.log
+# Helper to copy repo file if present, else write fallback
+copy_or_fallback() {
+  local rel="$1" dest="$2" fallback_tag="$3"
+  if [[ -f "${SRC_DIR}/${rel}" ]]; then
+    say " - ${rel} -> ${dest}"
+    install -D -m 0644 "${SRC_DIR}/${rel}" "${dest}"
+  else
+    say " - ${rel} not found in repo; writing default ${fallback_tag}"
+    tee "${dest}" >/dev/null <<"${fallback_tag}"
+${4}
+${fallback_tag}
+  fi
+}
 
-template(name="HourlyCombinedPath" type="string"
+# 1) Base /etc/rsyslog.conf
+copy_or_fallback "rsyslog.conf" "/etc/rsyslog.conf" "RSYSLOG_BASE" \
+'# Minimal rsyslog.conf for PocketLog
+module(load="imuxsock")
+module(load="imklog")
+include(file="/etc/rsyslog.d/*.conf" mode="optional")
+*.emerg                         :omusrmsg:*
+auth,authpriv.*                 /var/log/auth.log
+*.*;auth,authpriv.none          -/var/log/syslog
+daemon.*                        -/var/log/daemon.log
+kern.*                          -/var/log/kern.log
+lpr.*                           -/var/log/lpr.log
+mail.*                          -/var/log/mail.log
+user.*                          -/var/log/user.log
+'
+
+# 2) /etc/rsyslog.d/00-load-inputs.conf (explicit loads so input() works everywhere)
+copy_or_fallback "rsyslog.d/00-load-inputs.conf" "/etc/rsyslog.d/00-load-inputs.conf" "LOAD_INPUTS" \
+'module(load="imudp")
+module(load="imtcp")
+'
+
+# 3) /etc/rsyslog.d/01-remote-hourly.conf (your one-hourly-file writer)
+copy_or_fallback "rsyslog.d/01-remote-hourly.conf" "/etc/rsyslog.d/01-remote-hourly.conf" "REMOTE_HOURLY" \
+'template(name="HourlyCombinedPath" type="string"
          string="/var/log/pocketlog/%$year%-%$month%-%$day%-%$hour%.log")
-
-# Trimmed raw message into msg='...'
 template(name="kv_line_raw" type="string"
-         string="_time=%timegenerated:::date-rfc3339% host=%fromhost-ip% msg='%msg:2:$:drop-last-lf%'\n")
-
-# Ruleset: write everything using kv_line_raw (keeps JSON bodies intact inside msg)
+         string="_time=%timegenerated:::date-rfc3339% host=%fromhost-ip% msg='%msg:::drop-last-lf%'\n")
 ruleset(name="remote_raw") {
   action(type="omfile"
          dynaFile="HourlyCombinedPath"
          template="kv_line_raw"
          createDirs="on" dirCreateMode="0755" FileCreateMode="0644")
 }
-RSY
+'
 
-# Bind UDP/TCP listeners to the ruleset
-say "Binding UDP/TCP inputs to remote_raw ruleset..."
-tee /etc/rsyslog.d/10-network-inputs.conf >/dev/null <<'RSY'
-# /etc/rsyslog.d/10-network-inputs.conf
-# Listeners for inbound syslog -> remote_raw ruleset
-input(type="imudp" port="514" ruleset="remote_raw")
+# 4) /etc/rsyslog.d/10-network-inputs.conf (bind inputs to the writer ruleset)
+copy_or_fallback "rsyslog.d/10-network-inputs.conf" "/etc/rsyslog.d/10-network-inputs.conf" "NETWORK_INPUTS" \
+'input(type="imudp" port="514" ruleset="remote_raw")
 input(type="imtcp" port="514" ruleset="remote_raw")
-RSY
+'
 
-# Slim default: only drop true local logs in the main ruleset (network inputs use remote_raw)
-say "Slimming 50-default.conf (drop true local logs only)..."
-tee /etc/rsyslog.d/50-default.conf >/dev/null <<'RSY'
-# /etc/rsyslog.d/50-default.conf
-# Drop true local logs in main ruleset; network inputs use remote_raw
-if ($inputname == "imuxsock" or $inputname == "imklog" or
+# 5) /etc/rsyslog.d/02-maxmsgsize.conf (legacy directive to avoid param-dupe warnings)
+copy_or_fallback "rsyslog.d/02-maxmsgsize.conf" "/etc/rsyslog.d/02-maxmsgsize.conf" "MAXSIZE" \
+'$MaxMessageSize 256k
+'
+
+# 6) /etc/rsyslog.d/50-default.conf (drop true local logs only)
+copy_or_fallback "rsyslog.d/50-default.conf" "/etc/rsyslog.d/50-default.conf" "DROP_LOCAL" \
+'if ($inputname == "imuxsock" or $inputname == "imklog" or
     (($fromhost-ip == "127.0.0.1" or $fromhost-ip == "::1") and
      $inputname != "imudp" and $inputname != "imtcp")) then stop
-RSY
+'
 
-# Ensure includes are enabled in the base rsyslog.conf
-if ! grep -q 'include(file="/etc/rsyslog.d/\*\.conf"' /etc/rsyslog.conf; then
-  say "Adding include directive to /etc/rsyslog.conf..."
+# Ensure the include exists (harmless if duplicate)
+grep -q 'include(file="/etc/rsyslog.d/\*\.conf"' /etc/rsyslog.conf || \
   echo 'include(file="/etc/rsyslog.d/*.conf" mode="optional")' >> /etc/rsyslog.conf
-fi
 
 say "Validating rsyslog configuration..."
 rsyslogd -N1 || die "rsyslog config validation failed (see errors above)."
-
 say "Restarting rsyslog..."
 systemctl restart rsyslog
-systemctl enable rsyslog >/dev/null 2>&1 || true
 
 # -----------------------------
 # L O G R O T A T E

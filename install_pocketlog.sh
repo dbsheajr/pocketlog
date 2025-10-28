@@ -2,15 +2,19 @@
 # install_pocketlog.sh — PocketLog bootstrap for Raspberry Pi OS (Debian Trixie)
 # - rsyslog writes ONE combined file per hour: /var/log/pocketlog/YYYY-MM-DD-HH.log
 # - Each line: _time=<rfc3339> host=<sender-ip> msg='<raw payload exactly as received>'
-# - logrotate compresses hourly; pocketlog.py uploads to S3
+# - A tiny hourly compressor gzips previous-hour files; pocketlog.py uploads .log.gz to S3
+# - Installs systemd timer to run uploader every 15 minutes
+
 set -euo pipefail
 
-say()  { printf "\n==> %s\n" "$*"; }
-warn() { printf "\n[WARN] %s\n" "$*" >&2; }
-die()  { printf "\n[ERROR] %s\n" "$*" >&2; exit 1; }
+say()  { printf "\n==> %s\n", "$*"; }
+warn() { printf "\n[WARN] %s\n", "$*" >&2; }
+die()  { printf "\n[ERROR] %s\n", "$*" >&2; exit 1; }
 
 # Must be root
-[[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root (use sudo)."
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  die "Run as root (use sudo)."
+fi
 
 # Resolve repo dir (script location), and an optional ./files/ directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +31,7 @@ say "Refreshing apt cache..."
 apt-get update -y
 
 say "Installing base packages..."
-apt-get install -y \
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
   rsyslog python3-venv python3-pip \
   awscli logrotate gzip jq tcpdump git ca-certificates
 
@@ -56,7 +60,7 @@ copy_first() {
 # -----------------------------
 # R S Y S L O G   C O N F I G
 # -----------------------------
-say "Installing rsyslog configuration (repo files preferred, with safe defaults)…"
+say "Installing rsyslog configuration (repo files preferred, with safe defaults)..."
 
 # 1) /etc/rsyslog.conf (minimal base that includes drop-ins)
 if ! copy_first "rsyslog.conf" "/etc/rsyslog.conf"; then
@@ -150,30 +154,34 @@ systemctl restart rsyslog
 systemctl enable rsyslog >/dev/null 2>&1 || true
 
 # -----------------------------
-# L O G R O T A T E
+# H O U R L Y   C O M P R E S S O R
 # -----------------------------
-say "Ensuring hourly logrotate policy for /var/log/pocketlog/*.log..."
-if [[ -f "${REPO_ROOT}/logrotate.d/pocketlog" ]]; then
-  install -D -m 0644 "${REPO_ROOT}/logrotate.d/pocketlog" "/etc/logrotate.d/pocketlog"
-elif [[ -f "${REPO_FILES_DIR}/logrotate.d/pocketlog" ]]; then
-  install -D -m 0644 "${REPO_FILES_DIR}/logrotate.d/pocketlog" "/etc/logrotate.d/pocketlog"
-else
-  cat >/etc/logrotate.d/pocketlog <<'LR'
-/var/log/pocketlog/*.log {
-    hourly
-    rotate 168
-    missingok
-    notifempty
-    compress
-    delaycompress
-    nocreate
-    sharedscripts
-    postrotate
-        /bin/systemctl kill -s HUP rsyslog >/dev/null 2>&1 || true
-    endscript
-}
-LR
-fi
+say "Installing PocketLog hourly compressor…"
+cat >/usr/local/sbin/pocketlog-hourly-rotate <<'SH'
+#!/bin/bash
+set -euo pipefail
+LOGDIR="/var/log/pocketlog"
+now="$(date +%Y-%m-%d-%H)"
+shopt -s nullglob
+for f in "${LOGDIR}"/*.log; do
+  base="$(basename "$f")"
+  # Only gzip files like 2025-10-28-13.log, not the current hour, not other logs
+  if [[ "$base" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}\.log$ ]] && [[ "$base" != "${now}.log" ]]; then
+    gzip -n -- "$f" || true
+  fi
+done
+SH
+chmod +x /usr/local/sbin/pocketlog-hourly-rotate
+
+# Hourly trigger via cron (systemd-logrotate is daily on Pi OS)
+cat >/etc/cron.hourly/pocketlog-rotate <<'SH'
+#!/bin/sh
+/usr/local/sbin/pocketlog-hourly-rotate
+SH
+chmod +x /etc/cron.hourly/pocketlog-rotate
+
+# Ensure no conflicting logrotate rule remains
+rm -f /etc/logrotate.d/pocketlog || true
 
 # -----------------------------
 # A P P   +   V E N V
@@ -191,10 +199,6 @@ else
   warn "pocketlog.py not found; dropping a no-op placeholder."
   cat >"${APP_DIR}/pocketlog.py" <<'PY'
 #!/usr/bin/env python3
-import time, pathlib
-log = pathlib.Path("/var/log/pocketlog/pocketlog_uploader.log")
-log.parent.mkdir(parents=True, exist_ok=True)
-log.write_text(time.strftime("%Y-%m-%d %H:%M:%S ") + "INFO placeholder uploader ran, nothing to do.\n")
 print("Uploaded 0 file(s).")
 PY
   chmod 0755 "${APP_DIR}/pocketlog.py"
@@ -285,31 +289,29 @@ systemctl restart rsyslog
 sleep 1
 
 say "Verifying listeners on 514…"
-ss -luntp | egrep ':514 ' || warn "Did not see 514 listeners—check rsyslog status."
-
-say "Kick uploader once (if real pocketlog.py present, it will upload previous hour)…"
-if systemctl start pocketlog-upload.service 2>/dev/null; then
-  sleep 1
-  tail -n 50 "${LOG_DIR}/pocketlog_uploader.log" || true
+if ! ss -luntp | egrep ':514 ' >/dev/null; then
+  warn "Did not see 514 listeners—check rsyslog status: systemctl status rsyslog --no-pager"
 fi
 
 cat <<'NEXT'
 
 Done!
 
-Next:
+Next steps:
   1) Provide AWS creds for root (service runs as root):
        sudo -H aws configure
   2) Set your S3 bucket/prefix:
        sudo nano /etc/pocketlog/pocketlog.conf
-  3) Send a test and check current-hour file:
+  3) Send a test and confirm current-hour file appears:
        IP=$(hostname -I | awk '{print $1}')
-       logger -n "$IP" -P 514 -t pltest "hello from PocketLog"
-       sudo tail -n 5 /var/log/pocketlog/$(date +%Y-%m-%d-%H).log
-  4) Force rotate & upload (optional for test):
-       sudo logrotate -f /etc/logrotate.d/pocketlog
+       logger -n "$IP" -P 514 -t pltest "hello PocketLog"
+       sudo tail -n 3 /var/log/pocketlog/$(date +%Y-%m-%d-%H).log
+  4) Wait for the hour to roll (or force once):
+       sudo /usr/local/sbin/pocketlog-hourly-rotate
+       ls -l /var/log/pocketlog | grep -E '\.log\.gz$' || echo "No gz yet"
+  5) Trigger an upload run now:
        sudo systemctl start pocketlog-upload.service
-       sudo tail -n 50 /var/log/pocketlog/pocketlog_uploader.log
+       sudo tail -n 100 /var/log/pocketlog/pocketlog_uploader.log
 
 Format on disk (per line):
   _time=<RFC3339> host=<sender-ip> msg='<raw payload exactly as received>'

@@ -1,0 +1,19 @@
+# Core runtime
+rsyslog
+python3-venv
+python3-pip
+awscli
+logrotate
+gzip
+jq
+git
+
+# Performance / testing (optional but nice)
+fio
+sysstat        # mpstat, pidstat, sar...
+mtr-tiny
+stress-ng
+tcpdump
+
+# Pi-specific (for vcgencmd)
+libraspberrypi-bin
